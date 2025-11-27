@@ -1,3 +1,8 @@
+streamlit
+opencv-python-headless
+numpy
+pandas
+requests
 fastapi
 uvicorn
 opencv-python-headless
@@ -6,4 +11,3 @@ numpy
 tensorflow
 python-multipart
 pandas
-firebase-admin
