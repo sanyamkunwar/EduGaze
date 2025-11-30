@@ -160,7 +160,7 @@ elif st.session_state.page == "Teacher Dashboard":
                             if img_data:
                                 img_bytes = base64.b64decode(img_data)
                                 img = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
-                                st.image(img[:,:,::-1], use_container_width=True)
+                                st.image(img[:,:,::-1], width='stretch')
 
                             score = data.get('score', 0)
                             status = data.get('status', 'N/A')
