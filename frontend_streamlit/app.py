@@ -18,8 +18,6 @@ st.set_page_config(layout="wide", page_title="EduGaze")
 # --- Session State Initialization ---
 if 'page' not in st.session_state:
     st.session_state.page = "Student View"
-if 'user_id' not in st.session_state:
-    st.session_state.user_id = str(uuid.uuid4())
 if 'engagement_history' not in st.session_state:
     st.session_state.engagement_history = []
 
@@ -29,62 +27,69 @@ BACKEND_URL = "https://edugaze-backend.onrender.com"
 # --- Thread-safe data sharing ---
 lock = threading.Lock()
 latest_analysis_data = {}
+last_error = None
 
 # --- WebRTC Video Processor ---
 class EduGazeVideoProcessor(VideoProcessorBase):
-    def __init__(self):
+    def __init__(self, user_id: str):
         self.last_sent = 0
+        self.user_id = user_id
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-        global latest_analysis_data
+        global latest_analysis_data, last_error
         img = frame.to_ndarray(format="bgr24")
 
         # Analyze frame every ~1 second
         if time.time() - self.last_sent > 1.0:
             self.last_sent = time.time()
             try:
-                # Ensure user_id is present before making a request
-                if 'user_id' not in st.session_state:
-                    return av.VideoFrame.from_ndarray(img, format="bgr24")
-
                 b = convert_frame_to_bytes(img)
                 resp = requests.post(
-                    f"{BACKEND_URL}/analyze/{st.session_state.user_id}",
+                    f"{BACKEND_URL}/analyze/{self.user_id}",
                     files={"file": ("f.jpg", b, "image/jpeg")},
-                    timeout=5
+                    timeout=5  # Increased timeout
                 ).json()
 
-                # Update shared data structure safely
                 with lock:
                     latest_analysis_data = resp
-                    # Also update engagement history
-                    score = resp.get("score", 0)
-                    st.session_state.engagement_history.append({"time": pd.Timestamp.now(), "score": score})
-                    if len(st.session_state.engagement_history) > 100:
-                        st.session_state.engagement_history.pop(0)
+                    last_error = None # Clear last error on success
 
             except requests.exceptions.RequestException as e:
-                # Cannot write to streamlit UI from this thread, but can log to console
+                with lock:
+                    last_error = "Error: Backend connection failed."
                 print(f"Backend connection error: {e}")
             except Exception as e:
+                with lock:
+                    last_error = "Error: Analysis failed."
                 print(f"An error occurred in video processor: {e}")
 
-
-        # Draw feedback on the frame from the latest available data
+        # Draw feedback on the frame
         with lock:
             face_bbox = latest_analysis_data.get("face_bbox")
             status = latest_analysis_data.get("status")
+            current_error = last_error
         
         if face_bbox:
             img = draw_focus_ring(img, face_bbox, status)
+        
+        if current_error:
+            cv2.putText(img, current_error, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+# --- Factory function to create the processor ---
+def processor_factory():
+    if 'user_id' not in st.session_state:
+        st.session_state.user_id = str(uuid.uuid4())
+    
+    return EduGazeVideoProcessor(user_id=st.session_state.user_id)
 
 # --- Sidebar for Navigation ---
 with st.sidebar:
     st.title("EduGaze")
     st.session_state.page = st.radio("Navigate", ["Student View", "Teacher Dashboard"])
-    st.info(f"Your User ID: {st.session_state.user_id}")
+    if 'user_id' in st.session_state:
+        st.info(f"Your User ID: {st.session_state.user_id}")
 
 # ======================================================================================
 # --- Student View ---
@@ -99,7 +104,7 @@ if st.session_state.page == "Student View":
         st.write("Click 'Start' to begin the session. Your browser will ask for camera permission.")
         webrtc_streamer(
             key="student-camera",
-            video_processor_factory=EduGazeVideoProcessor,
+            video_processor_factory=processor_factory,
             media_stream_constraints={"video": True, "audio": False},
             rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
             async_processing=True,
@@ -128,6 +133,7 @@ if st.session_state.page == "Student View":
         with lock:
             analysis = latest_analysis_data.copy()
 
+        # If there is any analysis data, update the UI
         if analysis:
             status = analysis.get("status", "N/A")
             score = analysis.get("score", 0)
@@ -146,9 +152,15 @@ if st.session_state.page == "Student View":
             else:
                 alert_box.empty()
             
-            if st.session_state.engagement_history:
-                history_df = pd.DataFrame(st.session_state.engagement_history).set_index("time")
-                chart_box.line_chart(history_df)
+            # Update engagement history (check for new score to avoid duplicates)
+            if not st.session_state.engagement_history or st.session_state.engagement_history[-1].get("score") != score:
+                st.session_state.engagement_history.append({"time": pd.Timestamp.now(), "score": score})
+                if len(st.session_state.engagement_history) > 100:
+                    st.session_state.engagement_history.pop(0)
+        
+        if st.session_state.engagement_history:
+            history_df = pd.DataFrame(st.session_state.engagement_history).set_index("time")
+            chart_box.line_chart(history_df)
         
         time.sleep(1)
 
