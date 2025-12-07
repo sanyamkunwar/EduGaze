@@ -1,13 +1,20 @@
-streamlit
-opencv-python-headless
-numpy
-pandas
-requests
+# Combined dependencies for both frontend and backend
+
+# Backend
 fastapi
 uvicorn
-opencv-python-headless
-mediapipe
-numpy
-tensorflow
 python-multipart
+firebase-admin
+tensorflow-cpu
+mediapipe
+
+# Frontend
+streamlit
+requests
+streamlit-webrtc
+av
+
+# Common
+numpy
 pandas
+opencv-python-headless
