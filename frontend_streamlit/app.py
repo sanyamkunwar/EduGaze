@@ -1,51 +1,204 @@
 import streamlit as st
+import cv2
+import requests
 import time
-import queue
+import pandas as pd
+import numpy as np
+import uuid
+import base64
 import av
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 
-st.set_page_config(layout="wide", page_title="Debug Test")
+from utils import convert_frame_to_bytes, draw_focus_ring
 
-# 1. The queue for communication
-result_queue: "queue.Queue[dict]" = queue.Queue()
+# --- Page Configuration ---
+st.set_page_config(layout="wide", page_title="EduGaze")
 
-# 2. A simple processor that just counts and sends data
-class CounterProcessor(VideoProcessorBase):
-    def __init__(self, result_queue: queue.Queue):
-        self.result_queue = result_queue
-        self.frame_count = 0
-        self.last_put = time.time()
+# --- Session State Initialization ---
+if 'page' not in st.session_state:
+    st.session_state.page = "Student View"
+if 'engagement_history' not in st.session_state:
+    st.session_state.engagement_history = []
+if 'user_id' not in st.session_state:
+    st.session_state.user_id = str(uuid.uuid4())
+
+# --- Backend URL ---
+BACKEND_URL = "https://edugaze-backend.onrender.com"
+
+# --- WebRTC Video Processor ---
+# This processor's only job is to send frames to the backend.
+# It does not need to handle any state or return data to the main thread.
+class EduGazeVideoProcessor(VideoProcessorBase):
+    def __init__(self, user_id: str):
+        self.last_sent = 0
+        self.user_id = user_id
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-        # Every second, put a simple dictionary into the queue
-        if time.time() - self.last_put > 1.0:
-            self.frame_count += 1
-            self.result_queue.put({"count": self.frame_count, "time": time.time()})
-            self.last_put = time.time()
-        
-        # Return the frame unmodified
-        return frame
+        img = frame.to_ndarray(format="bgr24")
 
-st.header("Minimal Queue Test")
-st.write("This is a diagnostic script. It does not use your backend.")
+        if time.time() - self.last_sent > 1.5: # Send frame every 1.5 seconds
+            self.last_sent = time.time()
+            try:
+                b = convert_frame_to_bytes(img)
+                requests.post(
+                    f"{BACKEND_URL}/analyze/{self.user_id}",
+                    files={"file": ("f.jpg", b, "image/jpeg")},
+                    timeout=10 # 10 second timeout for the post request
+                )
+            except requests.exceptions.RequestException as e:
+                print(f"Backend POST error: {e}")
+            except Exception as e:
+                print(f"An error occurred in video processor: {e}")
 
-webrtc_streamer(
-    key="test-cam",
-    video_processor_factory=lambda: CounterProcessor(result_queue=result_queue),
-    media_stream_constraints={"video": True, "audio": False},
-    rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
-    async_processing=True,
-)
+        # We return the original frame immediately without waiting for a response.
+        # The UI will get its data by polling the backend separately.
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-st.subheader("Result from Queue:")
-debug_area = st.empty()
+# --- Sidebar for Navigation ---
+with st.sidebar:
+    st.title("EduGaze")
+    st.session_state.page = st.radio("Navigate", ["Student View", "Teacher Dashboard"])
+    st.info(f"Your User ID: {st.session_state.user_id}")
 
-# 3. The simple UI loop to get data from the queue
-while True:
-    try:
-        result = result_queue.get(timeout=1.0)
-        debug_area.json(result)
-    except queue.Empty:
-        debug_area.write("Queue is empty. Waiting for data from video processor...")
+# ======================================================================================
+# --- Student View ---
+# ======================================================================================
+if st.session_state.page == "Student View":
+    st.header("Student Engagement Monitor")
     
-    time.sleep(0.5)
+    col1, col2 = st.columns([2, 1])
+
+    with col1:
+        st.subheader("Live Feed")
+        st.write("Click 'Start' to begin the session. Your browser will ask for camera permission.")
+        webrtc_streamer(
+            key="student-camera",
+            video_processor_factory=lambda: EduGazeVideoProcessor(user_id=st.session_state.user_id),
+            media_stream_constraints={"video": True, "audio": False},
+            rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+            async_processing=True,
+        )
+
+    with col2:
+        st.subheader("Engagement Summary")
+        status_box = st.empty()
+        alert_box = st.empty()
+        score_box = st.empty()
+        
+        st.divider()
+        
+        col2_1, col2_2, col2_3 = st.columns(3)
+        emo_box = col2_1.empty()
+        blink_box = col2_2.empty()
+        yawn_box = col2_3.empty()
+        
+        st.divider()
+
+        st.subheader("Engagement Trend")
+        chart_box = st.empty()
+
+    # UI update loop - now polls the backend for its own data
+    while st.session_state.page == "Student View":
+        try:
+            # Fetch all dashboard data
+            all_data = requests.get(f"{BACKEND_URL}/dashboard/data", timeout=5).json()
+            # Get data for the current user
+            analysis = all_data.get(st.session_state.user_id)
+        except requests.exceptions.RequestException:
+            analysis = None
+        except Exception:
+            analysis = None
+
+        if analysis:
+            status = analysis.get("status", "N/A")
+            score = analysis.get("score", 0)
+            emotion = analysis.get("emotion", "N/A")
+            blinks = analysis.get("blinks", 0)
+            yawns = analysis.get("yawns", 0)
+
+            status_box.write(f"### Status: **{status}**")
+            score_box.metric("Engagement Score", f"{score:.2f}")
+            emo_box.metric("Emotion", emotion.capitalize())
+            blink_box.metric("Blinks", blinks)
+            yawn_box.metric("Yawns", yawns)
+
+            if status == "Low Engagement":
+                alert_box.error("Low Engagement Detected!", icon="⚠️")
+            else:
+                alert_box.empty()
+            
+            # Update engagement history
+            if not st.session_state.engagement_history or st.session_state.engagement_history[-1].get("score") != score:
+                st.session_state.engagement_history.append({"time": pd.Timestamp.now(), "score": score})
+                if len(st.session_state.engagement_history) > 100:
+                    st.session_state.engagement_history.pop(0)
+        
+        if st.session_state.engagement_history:
+            history_df = pd.DataFrame(st.session_state.engagement_history).set_index("time")
+            chart_box.line_chart(history_df)
+        
+        time.sleep(2) # Poll every 2 seconds
+
+# ======================================================================================
+# --- Teacher Dashboard View ---
+# ======================================================================================
+elif st.session_state.page == "Teacher Dashboard":
+    st.header("Teacher Dashboard")
+    st.subheader("Live Student Grid")
+
+    placeholder = st.empty()
+
+    while True:
+        try:
+            resp = requests.get(f"{BACKEND_URL}/dashboard/data", timeout=5).json()
+            
+            with placeholder.container():
+                if not resp:
+                    st.info("No student data available yet. Ask students to open the Student View.")
+                else:
+                    student_ids = list(resp.keys())
+                    num_students = len(student_ids)
+                    
+                    cols = st.columns(4)
+                    
+                    for i in range(num_students):
+                        user_id = student_ids[i]
+                        data = resp[user_id]
+                        col = cols[i % 4]
+
+                        with col:
+                            st.subheader(f"Student #{user_id[:4]}")
+                            
+                            img_data = data.get("live_frame", "").split(",")[1]
+                            if img_data:
+                                img_bytes = base64.b64decode(img_data)
+                                img = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
+                                st.image(img[:,:,::-1], width='stretch')
+
+                            score = data.get('score', 0)
+                            status = data.get('status', 'N/A')
+                            is_flagged = data.get('is_flagged', False)
+
+                            if is_flagged:
+                                st.error("🚩 FLAGGED: Low Engagement > 1 min")
+                            
+                            st.metric("Score", f"{score:.2f}")
+                            
+                            if not is_flagged:
+                                if status == "Low Engagement":
+                                    st.warning(f"Status: {status}")
+                                elif status == "Medium Engagement":
+                                    st.info(f"Status: {status}")
+                                else:
+                                    st.success(f"Status: {status}")
+
+        except requests.exceptions.RequestException as e:
+            with placeholder.container():
+                st.error(f"Could not connect to backend: {e}")
+        
+        except Exception as e:
+            with placeholder.container():
+                st.error(f"An error occurred: {e}")
+            break
+
+        time.sleep(2)
