@@ -26,8 +26,6 @@ if 'user_id' not in st.session_state:
 BACKEND_URL = "https://edugaze-backend.onrender.com"
 
 # --- WebRTC Video Processor ---
-# This processor sends frames to the backend and draws the response on the frame.
-# It does NOT communicate back to the main Streamlit thread.
 class EduGazeVideoProcessor(VideoProcessorBase):
     def __init__(self, user_id: str):
         self.last_sent = 0
@@ -37,7 +35,6 @@ class EduGazeVideoProcessor(VideoProcessorBase):
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
 
-        # Send frame to backend for analysis
         if time.time() - self.last_sent > 1.5:
             self.last_sent = time.time()
             try:
@@ -55,7 +52,6 @@ class EduGazeVideoProcessor(VideoProcessorBase):
                 print(f"An error occurred in video processor: {e}")
                 self.last_analysis_data = {"error": "Analysis failed."}
 
-        # Draw feedback on the frame using the last known data
         face_bbox = self.last_analysis_data.get("face_bbox")
         status = self.last_analysis_data.get("status")
         error = self.last_analysis_data.get("error")
@@ -94,67 +90,41 @@ if st.session_state.page == "Student View":
         )
 
     with col2:
-        st.subheader("Engagement Summary")
-        status_box = st.empty()
-        alert_box = st.empty()
-        score_box = st.empty()
+        st.subheader("Glass Pane Debugger")
         
-        st.divider()
-        
-        col2_1, col2_2, col2_3 = st.columns(3)
-        emo_box = col2_1.empty()
-        blink_box = col2_2.empty()
-        yawn_box = col2_3.empty()
-        
-        st.divider()
+        # UI update loop - now a full debugger
+        while st.session_state.page == "Student View":
+            st.markdown("---")
+            st.subheader(f"UI Loop Refresh at {time.strftime('%H:%M:%S')}")
 
-        st.subheader("Engagement Trend")
-        chart_box = st.empty()
+            my_user_id = st.session_state.user_id
+            st.write(f"**1. My User ID:** `{my_user_id}`")
 
-    # UI update loop - now polls the backend for its own data
-    while st.session_state.page == "Student View":
-        analysis = None
-        try:
-            # Fetch all dashboard data
-            all_data = requests.get(f"{BACKEND_URL}/dashboard/data", timeout=5).json()
-            # Get data for the current user
-            analysis = all_data.get(st.session_state.user_id)
-        except requests.exceptions.RequestException:
-            # This is expected if the backend is slow to respond initially
-            pass
-        except Exception:
-            # Catch other potential errors like JSON decoding
-            pass
+            all_data = None
+            analysis = None
+            error_message = None
 
-        if analysis:
-            status = analysis.get("status", "N/A")
-            score = analysis.get("score", 0)
-            emotion = analysis.get("emotion", "N/A")
-            blinks = analysis.get("blinks", 0)
-            yawns = analysis.get("yawns", 0)
+            try:
+                st.write("**2. Fetching data from backend...**")
+                all_data = requests.get(f"{BACKEND_URL}/dashboard/data", timeout=5).json()
+                st.write("**3. Data received from backend:**")
+                st.json(all_data if all_data else {"message": "Backend returned empty response."})
 
-            status_box.write(f"### Status: **{status}**")
-            score_box.metric("Engagement Score", f"{score:.2f}")
-            emo_box.metric("Emotion", emotion.capitalize())
-            blink_box.metric("Blinks", blinks)
-            yawn_box.metric("Yawns", yawns)
+                analysis = all_data.get(my_user_id)
+                st.write("**4. Result of looking for my User ID:**")
+                st.json(analysis if analysis else {"message": "My user_id was not found in the data."})
 
-            if status == "Low Engagement":
-                alert_box.error("Low Engagement Detected!", icon="⚠️")
+            except Exception as e:
+                error_message = str(e)
+                st.write("**Error during data fetch:**")
+                st.error(error_message)
+
+            if analysis:
+                st.success("✅ My data was found! UI should be updating.")
             else:
-                alert_box.empty()
-            
-            # Update engagement history
-            if not st.session_state.engagement_history or st.session_state.engagement_history[-1].get("score") != score:
-                st.session_state.engagement_history.append({"time": pd.Timestamp.now(), "score": score})
-                if len(st.session_state.engagement_history) > 100:
-                    st.session_state.engagement_history.pop(0)
-        
-        if st.session_state.engagement_history:
-            history_df = pd.DataFrame(st.session_state.engagement_history).set_index("time")
-            chart_box.line_chart(history_df)
-        
-        time.sleep(2) # Poll every 2 seconds
+                st.warning("❌ My data was NOT found. UI is not updating.")
+
+            time.sleep(2) # Poll every 2 seconds
 
 # ======================================================================================
 # --- Teacher Dashboard View ---
