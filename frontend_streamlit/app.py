@@ -49,7 +49,6 @@ class EduGazeVideoProcessor(VideoProcessorBase):
                     timeout=20
                 ).json()
                 
-                # Store for drawing and put in queue for the main thread
                 self.last_analysis_data = resp
                 result_queue.put(resp)
 
@@ -110,56 +109,18 @@ if st.session_state.page == "Student View":
 
     with col2:
         st.subheader("Engagement Summary")
-        status_box = st.empty()
-        alert_box = st.empty()
-        score_box = st.empty()
-        
-        st.divider()
-        
-        col2_1, col2_2, col2_3 = st.columns(3)
-        emo_box = col2_1.empty()
-        blink_box = col2_2.empty()
-        yawn_box = col2_3.empty()
-        
-        st.divider()
+        # This is now just a debug area
+        debug_area = st.empty()
 
-        st.subheader("Engagement Trend")
-        chart_box = st.empty()
-
-    # UI update loop
+    # Minimal debug loop
     while st.session_state.page == "Student View":
         try:
             analysis = result_queue.get(timeout=1.0)
+            debug_area.json(analysis)
         except queue.Empty:
-            analysis = None
-
-        if analysis and "error" not in analysis:
-            status = analysis.get("status", "N/A")
-            score = analysis.get("score", 0)
-            emotion = analysis.get("emotion", "N/A")
-            blinks = analysis.get("blinks", 0)
-            yawns = analysis.get("yawns", 0)
-
-            status_box.write(f"### Status: **{status}**")
-            score_box.metric("Engagement Score", f"{score:.2f}")
-            emo_box.metric("Emotion", emotion.capitalize())
-            blink_box.metric("Blinks", blinks)
-            yawn_box.metric("Yawns", yawns)
-
-            if status == "Low Engagement":
-                alert_box.error("Low Engagement Detected!", icon="⚠️")
-            else:
-                alert_box.empty()
-            
-            st.session_state.engagement_history.append({"time": pd.Timestamp.now(), "score": score})
-            if len(st.session_state.engagement_history) > 100:
-                st.session_state.engagement_history.pop(0)
+            debug_area.write("Waiting for analysis data...")
         
-        if st.session_state.engagement_history:
-            history_df = pd.DataFrame(st.session_state.engagement_history).set_index("time")
-            chart_box.line_chart(history_df)
-        
-        time.sleep(0.1) # Faster UI refresh
+        time.sleep(0.5)
 
 
 # ======================================================================================
