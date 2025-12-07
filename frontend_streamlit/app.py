@@ -35,6 +35,7 @@ class EduGazeVideoProcessor(VideoProcessorBase):
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
 
+        # Send frame to backend for analysis every 1.5 seconds
         if time.time() - self.last_sent > 1.5:
             self.last_sent = time.time()
             try:
@@ -52,6 +53,7 @@ class EduGazeVideoProcessor(VideoProcessorBase):
                 print(f"An error occurred in video processor: {e}")
                 self.last_analysis_data = {"error": "Analysis failed."}
 
+        # Draw feedback on the frame using the last known data
         face_bbox = self.last_analysis_data.get("face_bbox")
         status = self.last_analysis_data.get("status")
         error = self.last_analysis_data.get("error")
@@ -68,7 +70,6 @@ class EduGazeVideoProcessor(VideoProcessorBase):
 with st.sidebar:
     st.title("EduGaze")
     st.session_state.page = st.radio("Navigate", ["Student View", "Teacher Dashboard"])
-    # The user_id is now dynamic, so we show it in the main panel
     
 # ======================================================================================
 # --- Student View ---
@@ -82,7 +83,6 @@ if st.session_state.page == "Student View":
         st.subheader("Live Feed")
         st.write("Click 'Start' to begin the session. Your browser will ask for camera permission.")
         
-        # The webrtc_streamer returns a context object
         ctx = webrtc_streamer(
             key="student-camera",
             video_processor_factory=EduGazeVideoProcessor,
@@ -93,9 +93,10 @@ if st.session_state.page == "Student View":
 
     with col2:
         st.subheader("Engagement Summary")
-        # Display the user ID from the processor context if available
+        
+        user_id_placeholder = st.empty()
         if ctx.video_processor:
-            st.info(f"Your User ID: {ctx.video_processor.user_id}")
+            user_id_placeholder.info(f"Your User ID: {ctx.video_processor.user_id}")
 
         status_box = st.empty()
         alert_box = st.empty()
@@ -113,17 +114,18 @@ if st.session_state.page == "Student View":
         st.subheader("Engagement Trend")
         chart_box = st.empty()
 
-    # This is the main UI update loop
-    while ctx.state.playing: # Loop only while the camera is running
+    # Main UI update loop
+    while ctx.state.playing:
         analysis = None
-        # Get the one true user_id from the running video processor
         if ctx.video_processor:
+            # Display the user ID as it becomes available
+            user_id_placeholder.info(f"Your User ID: {ctx.video_processor.user_id}")
             processor_user_id = ctx.video_processor.user_id
             try:
                 all_data = requests.get(f"{BACKEND_URL}/dashboard/data", timeout=5).json()
                 analysis = all_data.get(processor_user_id)
             except Exception:
-                pass
+                pass # Silently ignore errors in the polling loop
 
         if analysis:
             status = analysis.get("status", "N/A")
@@ -153,86 +155,6 @@ if st.session_state.page == "Student View":
             chart_box.line_chart(history_df)
         
         time.sleep(2)
-
-# ======================================================================================
-# --- Teacher Dashboard View ---
-# ======================================================================================
-elif st.session_state.page == "Teacher Dashboard":
-    st.header("Teacher Dashboard")
-    st.subheader("Live Student Grid")
-
-    placeholder = st.empty()
-
-    while True:
-        try:
-            resp = requests.get(f"{BACKEND_URL}/dashboard/data", timeout=5).json()
-            
-            with placeholder.container():
-                if not resp:
-                    st.info("No student data available yet. Ask students to open the Student View.")
-                else:
-                    student_ids = list(resp.keys())
-                    num_students = len(student_ids)
-                    
-                    cols = st.columns(4)
-                    
-                    for i in range(num_students):
-                        user_id = student_ids[i]
-                        data = resp[user_id]
-                        col = cols[i % 4]
-
-                        with col:
-                            st.subheader(f"Student #{user_id[:4]}")
-                            
-                            img_data = data.get("live_frame", "").split(",")[1]
-                            if img_data:
-                                img_bytes = base64.b64decode(img_data)
-                                img = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
-                                st.image(img[:,:,::-1], width='stretch')
-
-                            score = data.get('score', 0)
-                            status = data.get('status', 'N/A')
-                            is_flagged = data.get('is_flagged', False)
-
-                            if is_flagged:
-                                st.error("🚩 FLAGGED: Low Engagement > 1 min")
-                            
-                            st.metric("Score", f"{score:.2f}")
-                            
-                            if not is_flagged:
-                                if status == "Low Engagement":
-                                    st.warning(f"Status: {status}")
-                                elif status == "Medium Engagement":
-                                    st.info(f"Status: {status}")
-                                else:
-                                    st.success(f"Status: {status}")
-
-        except requests.exceptions.RequestException as e:
-            with placeholder.container():
-                st.error(f"Could not connect to backend: {e}")
-        
-        except Exception as e:
-            with placeholder.container():
-                st.error(f"An error occurred: {e}")
-            break
-
-        time.sleep(2)
-
-                analysis = all_data.get(my_user_id)
-                st.write("**4. Result of looking for my User ID:**")
-                st.json(analysis if analysis else {"message": "My user_id was not found in the data."})
-
-            except Exception as e:
-                error_message = str(e)
-                st.write("**Error during data fetch:**")
-                st.error(error_message)
-
-            if analysis:
-                st.success("✅ My data was found! UI should be updating.")
-            else:
-                st.warning("❌ My data was NOT found. UI is not updating.")
-
-            time.sleep(2) # Poll every 2 seconds
 
 # ======================================================================================
 # --- Teacher Dashboard View ---
