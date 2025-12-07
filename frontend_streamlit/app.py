@@ -6,6 +6,9 @@ import pandas as pd
 import numpy as np
 import uuid
 import base64
+import threading
+import av
+from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 
 from utils import convert_frame_to_bytes, draw_focus_ring
 
@@ -19,12 +22,63 @@ if 'user_id' not in st.session_state:
     st.session_state.user_id = str(uuid.uuid4())
 if 'engagement_history' not in st.session_state:
     st.session_state.engagement_history = []
-if 'last_sent' not in st.session_state:
-    st.session_state.last_sent = 0
 
 # --- Backend URL ---
-# This will be replaced with the deployed backend URL
 BACKEND_URL = "https://edugaze-backend.onrender.com"
+
+# --- Thread-safe data sharing ---
+lock = threading.Lock()
+latest_analysis_data = {}
+
+# --- WebRTC Video Processor ---
+class EduGazeVideoProcessor(VideoProcessorBase):
+    def __init__(self):
+        self.last_sent = 0
+
+    def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+        global latest_analysis_data
+        img = frame.to_ndarray(format="bgr24")
+
+        # Analyze frame every ~1 second
+        if time.time() - self.last_sent > 1.0:
+            self.last_sent = time.time()
+            try:
+                # Ensure user_id is present before making a request
+                if 'user_id' not in st.session_state:
+                    return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+                b = convert_frame_to_bytes(img)
+                resp = requests.post(
+                    f"{BACKEND_URL}/analyze/{st.session_state.user_id}",
+                    files={"file": ("f.jpg", b, "image/jpeg")},
+                    timeout=5
+                ).json()
+
+                # Update shared data structure safely
+                with lock:
+                    latest_analysis_data = resp
+                    # Also update engagement history
+                    score = resp.get("score", 0)
+                    st.session_state.engagement_history.append({"time": pd.Timestamp.now(), "score": score})
+                    if len(st.session_state.engagement_history) > 100:
+                        st.session_state.engagement_history.pop(0)
+
+            except requests.exceptions.RequestException as e:
+                # Cannot write to streamlit UI from this thread, but can log to console
+                print(f"Backend connection error: {e}")
+            except Exception as e:
+                print(f"An error occurred in video processor: {e}")
+
+
+        # Draw feedback on the frame from the latest available data
+        with lock:
+            face_bbox = latest_analysis_data.get("face_bbox")
+            status = latest_analysis_data.get("status")
+        
+        if face_bbox:
+            img = draw_focus_ring(img, face_bbox, status)
+
+        return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 # --- Sidebar for Navigation ---
 with st.sidebar:
@@ -42,8 +96,14 @@ if st.session_state.page == "Student View":
 
     with col1:
         st.subheader("Live Feed")
-        FRAME = st.image([])
-        cap = cv2.VideoCapture(0)
+        st.write("Click 'Start' to begin the session. Your browser will ask for camera permission.")
+        webrtc_streamer(
+            key="student-camera",
+            video_processor_factory=EduGazeVideoProcessor,
+            media_stream_constraints={"video": True, "audio": False},
+            rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
+            async_processing=True,
+        )
 
     with col2:
         st.subheader("Engagement Summary")
@@ -63,68 +123,35 @@ if st.session_state.page == "Student View":
         st.subheader("Engagement Trend")
         chart_box = st.empty()
 
-    while cap.isOpened():
-        # If we've navigated away, stop the camera loop
-        if st.session_state.page != "Student View":
-            break
+    # UI update loop
+    while st.session_state.page == "Student View":
+        with lock:
+            analysis = latest_analysis_data.copy()
 
-        ret, frame = cap.read()
-        if not ret:
-            st.error("Cannot access webcam")
-            break
+        if analysis:
+            status = analysis.get("status", "N/A")
+            score = analysis.get("score", 0)
+            emotion = analysis.get("emotion", "N/A")
+            blinks = analysis.get("blinks", 0)
+            yawns = analysis.get("yawns", 0)
 
-        # Analyze frame every 1 second
-        if time.time() - st.session_state.last_sent > 0.8:
-            try:
-                b = convert_frame_to_bytes(frame)
-                resp = requests.post(
-                    f"{BACKEND_URL}/analyze/{st.session_state.user_id}",
-                    files={"file": ("f.jpg", b, "image/jpeg")},
-                    timeout=5
-                ).json()
+            status_box.write(f"### Status: **{status}**")
+            score_box.metric("Engagement Score", f"{score:.2f}")
+            emo_box.metric("Emotion", emotion.capitalize())
+            blink_box.metric("Blinks", blinks)
+            yawn_box.metric("Yawns", yawns)
 
-                # --- Update UI Elements ---
-                status = resp.get("status", "N/A")
-                score = resp.get("score", 0)
-                emotion = resp.get("emotion", "N/A")
-                blinks = resp.get("blinks", 0)
-                yawns = resp.get("yawns", 0)
-                face_bbox = resp.get("face_bbox")
-
-                status_box.write(f"### Status: **{status}**")
-                score_box.metric("Engagement Score", f"{score:.2f}")
-                emo_box.metric("Emotion", emotion.capitalize())
-                blink_box.metric("Blinks", blinks)
-                yawn_box.metric("Yawns", yawns)
-
-                # --- Engagement Alert ---
-                if status == "Low Engagement":
-                    alert_box.error("Low Engagement Detected!", icon="⚠️")
-                else:
-                    alert_box.empty()
-
-                # --- Update Engagement History & Chart ---
-                st.session_state.engagement_history.append({"time": pd.Timestamp.now(), "score": score})
-                if len(st.session_state.engagement_history) > 100: # Keep last 100 points
-                    st.session_state.engagement_history.pop(0)
-                
+            if status == "Low Engagement":
+                alert_box.error("Low Engagement Detected!", icon="⚠️")
+            else:
+                alert_box.empty()
+            
+            if st.session_state.engagement_history:
                 history_df = pd.DataFrame(st.session_state.engagement_history).set_index("time")
                 chart_box.line_chart(history_df)
+        
+        time.sleep(1)
 
-                # --- Draw Face Focus Ring ---
-                if face_bbox:
-                    frame = draw_focus_ring(frame, face_bbox, status)
-
-                st.session_state.last_sent = time.time()
-
-            except requests.exceptions.RequestException as e:
-                st.error(f"Backend connection error: {e}")
-                time.sleep(2) # Avoid spamming errors
-
-        # Display the frame
-        FRAME.image(frame[:, :, ::-1])
-
-    cap.release()
 
 # ======================================================================================
 # --- Teacher Dashboard View ---
