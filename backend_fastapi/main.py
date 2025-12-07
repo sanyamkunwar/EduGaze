@@ -4,23 +4,29 @@ import numpy as np
 import cv2
 import base64
 import time
+import asyncio
 import firebase_admin
 from firebase_admin import credentials, db
 
 from analysis import analyze_frame
 from scoring import compute_engagement, EAR_THRESH, MAR_THRESH
 
+# --- Constants ---
+INACTIVE_USER_TIMEOUT_SECONDS = 15 # Time before a user is considered disconnected
+
 # --- Firebase Setup (Placeholder) ---
 # IMPORTANT: Replace with your actual Firebase project credentials
 try:
-    cred = credentials.Certificate("path/to/your/firebase-credentials.json")
-    firebase_admin.initialize_app(cred, {
-        'databaseURL': 'https://your-database-name.firebaseio.com'
-    })
-    FIREBASE_ENABLED = True
+    # cred = credentials.Certificate("path/to/your/firebase-credentials.json")
+    # firebase_admin.initialize_app(cred, {
+    #     'databaseURL': 'https://your-database-name.firebaseio.com'
+    # })
+    # FIREBASE_ENABLED = True
+    # For this example, we'll assume Firebase is not configured.
+    raise ValueError("Firebase not configured")
 except Exception as e:
     print(f"Firebase not initialized: {e}")
-    print("Running in offline mode. Teacher dashboard will not be available.")
+    print("Running in offline mode. Teacher dashboard will use in-memory data.")
     FIREBASE_ENABLED = False
 # ------------------------------------
 
@@ -44,12 +50,7 @@ DASHBOARD_DATA = {}
 def get_user_state(user_id: str):
     """Gets or creates a state for a given user_id."""
     now = time.time()
-    # Clean up old states to prevent memory leak
-    for uid in list(USER_STATES.keys()):
-        if now - USER_STATES[uid].get("last_update", 0) > 600: # 10 min timeout
-            del USER_STATES[uid]
-
-    if user_id not in USER_STATES or now - USER_STATES[user_id].get("last_update", 0) > 10:
+    if user_id not in USER_STATES:
         USER_STATES[user_id] = {
             "blink_counter": 0,
             "is_blinking": False,
@@ -159,15 +160,31 @@ async def analyze(user_id: str, file: UploadFile = File(...)):
 @app.get("/dashboard/data")
 async def get_dashboard_data():
     """
-    Endpoint for the teacher dashboard to fetch all student data.
-    In a real application, this should be secured.
+    Endpoint for the teacher dashboard. It cleans up inactive users
+    before returning the data.
     """
-    if FIREBASE_ENABLED:
-        try:
-            return db.reference('dashboard').get()
-        except Exception as e:
-            print(f"Firebase fetch failed: {e}")
-            # Fallback to in-memory data if Firebase fails
-            return DASHBOARD_DATA
+    now = time.time()
     
-    return DASHBOARD_DATA
+    # Identify and collect inactive user IDs
+    inactive_user_ids = [
+        user_id for user_id, data in DASHBOARD_DATA.items()
+        if now - data.get("last_updated", 0) > INACTIVE_USER_TIMEOUT_SECONDS
+    ]
+    
+    # Remove inactive users from all data stores
+    for user_id in inactive_user_ids:
+        print(f"Cleaning up inactive user: {user_id}")
+        DASHBOARD_DATA.pop(user_id, None)
+        USER_STATES.pop(user_id, None)
+        
+        if FIREBASE_ENABLED:
+            try:
+                db.reference(f'dashboard/{user_id}').delete()
+            except Exception as e:
+                print(f"Firebase delete failed for user {user_id}: {e}")
+
+    # Add a version number for debugging
+    return {
+        "__v__": "backend_v3_debug",
+        **DASHBOARD_DATA
+    }

@@ -73,7 +73,7 @@ if st.session_state.page == "Student View":
             break
 
         # Analyze frame every 1 second
-        if time.time() - st.session_state.last_sent > 0.1:
+        if time.time() - st.session_state.last_sent > 0.8:
             try:
                 b = convert_frame_to_bytes(frame)
                 resp = requests.post(
@@ -130,14 +130,19 @@ if st.session_state.page == "Student View":
 # ======================================================================================
 elif st.session_state.page == "Teacher Dashboard":
     st.header("Teacher Dashboard")
+    
+    version_placeholder = st.empty()
     st.subheader("Live Student Grid")
-
     placeholder = st.empty()
 
     while True:
         try:
             resp = requests.get(f"{BACKEND_URL}/dashboard/data", timeout=5).json()
             
+            # --- Version Check ---
+            backend_version = resp.pop("__v__", "unknown")
+            version_placeholder.caption(f"Backend Version: {backend_version} | Last updated: {time.strftime('%H:%M:%S')}")
+
             with placeholder.container():
                 if not resp:
                     st.info("No student data available yet. Ask students to open the Student View.")
