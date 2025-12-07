@@ -3,7 +3,7 @@ uvicorn
 opencv-python-headless
 mediapipe
 numpy
-tensorflow
+tensorflow-cpu
 python-multipart
 pandas
 firebase-admin
