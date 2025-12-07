@@ -47,7 +47,7 @@ class EduGazeVideoProcessor(VideoProcessorBase):
                 resp = requests.post(
                     f"{BACKEND_URL}/analyze/{self.user_id}",
                     files={"file": ("f.jpg", b, "image/jpeg")},
-                    timeout=5  # Increased timeout
+                    timeout=20  # Increased timeout
                 ).json()
 
                 with lock:
@@ -112,6 +112,10 @@ if st.session_state.page == "Student View":
 
     with col2:
         st.subheader("Engagement Summary")
+        
+        # Add a placeholder for the debug JSON
+        debug_placeholder = st.empty()
+        
         status_box = st.empty()
         alert_box = st.empty()
         score_box = st.empty()
@@ -132,6 +136,9 @@ if st.session_state.page == "Student View":
     while st.session_state.page == "Student View":
         with lock:
             analysis = latest_analysis_data.copy()
+
+        # Display the raw analysis data for debugging
+        debug_placeholder.json(analysis)
 
         # If there is any analysis data, update the UI
         if analysis:
