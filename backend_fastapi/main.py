@@ -5,6 +5,8 @@ import cv2
 import base64
 import time
 import asyncio
+import os
+import json
 import firebase_admin
 from firebase_admin import credentials, db
 
@@ -14,16 +16,21 @@ from scoring import compute_engagement, EAR_THRESH, MAR_THRESH
 # --- Constants ---
 INACTIVE_USER_TIMEOUT_SECONDS = 15 # Time before a user is considered disconnected
 
-# --- Firebase Setup (Placeholder) ---
-# IMPORTANT: Replace with your actual Firebase project credentials
+# --- Firebase Setup ---
 try:
-    # cred = credentials.Certificate("path/to/your/firebase-credentials.json")
-    # firebase_admin.initialize_app(cred, {
-    #     'databaseURL': 'https://your-database-name.firebaseio.com'
-    # })
-    # FIREBASE_ENABLED = True
-    # For this example, we'll assume Firebase is not configured.
-    raise ValueError("Firebase not configured")
+    # In deployment, Firebase credentials and DB URL should be set as environment variables
+    firebase_creds_json = os.getenv("FIREBASE_CREDS_JSON")
+    firebase_db_url = os.getenv("FIREBASE_DB_URL")
+
+    if not firebase_creds_json or not firebase_db_url:
+        raise ValueError("FIREBASE_CREDS_JSON or FIREBASE_DB_URL environment variable not set.")
+
+    firebase_creds_dict = json.loads(firebase_creds_json)
+    
+    cred = credentials.Certificate(firebase_creds_dict)
+    firebase_admin.initialize_app(cred, {'databaseURL': firebase_db_url})
+    FIREBASE_ENABLED = True
+    print("Firebase successfully initialized from environment variables.")
 except Exception as e:
     print(f"Firebase not initialized: {e}")
     print("Running in offline mode. Teacher dashboard will use in-memory data.")
@@ -183,8 +190,4 @@ async def get_dashboard_data():
             except Exception as e:
                 print(f"Firebase delete failed for user {user_id}: {e}")
 
-    # Add a version number for debugging
-    return {
-        "__v__": "backend_v3_debug",
-        **DASHBOARD_DATA
-    }
+    return DASHBOARD_DATA
