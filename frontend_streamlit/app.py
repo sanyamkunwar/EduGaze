@@ -8,6 +8,7 @@ import uuid
 import base64
 import threading
 import av
+import queue
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase
 
 from utils import convert_frame_to_bytes, draw_focus_ring
@@ -24,19 +25,17 @@ if 'engagement_history' not in st.session_state:
 # --- Backend URL ---
 BACKEND_URL = "https://edugaze-backend.onrender.com"
 
-# --- Thread-safe data sharing ---
-lock = threading.Lock()
-latest_analysis_data = {}
-last_error = None
+# --- Thread-safe Queue for results ---
+result_queue: "queue.Queue[dict]" = queue.Queue()
 
 # --- WebRTC Video Processor ---
 class EduGazeVideoProcessor(VideoProcessorBase):
     def __init__(self, user_id: str):
         self.last_sent = 0
         self.user_id = user_id
+        self.last_analysis_data = {} # Store last result for drawing
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
-        global latest_analysis_data, last_error
         img = frame.to_ndarray(format="bgr24")
 
         # Analyze frame every ~1 second
@@ -47,33 +46,32 @@ class EduGazeVideoProcessor(VideoProcessorBase):
                 resp = requests.post(
                     f"{BACKEND_URL}/analyze/{self.user_id}",
                     files={"file": ("f.jpg", b, "image/jpeg")},
-                    timeout=20  # Increased timeout
+                    timeout=20
                 ).json()
-
-                with lock:
-                    latest_analysis_data = resp
-                    last_error = None # Clear last error on success
+                
+                # Store for drawing and put in queue for the main thread
+                self.last_analysis_data = resp
+                result_queue.put(resp)
 
             except requests.exceptions.RequestException as e:
-                with lock:
-                    last_error = "Error: Backend connection failed."
                 print(f"Backend connection error: {e}")
+                self.last_analysis_data = {"error": "Backend connection failed."}
+                result_queue.put(self.last_analysis_data)
             except Exception as e:
-                with lock:
-                    last_error = "Error: Analysis failed."
                 print(f"An error occurred in video processor: {e}")
+                self.last_analysis_data = {"error": "Analysis failed."}
+                result_queue.put(self.last_analysis_data)
 
-        # Draw feedback on the frame
-        with lock:
-            face_bbox = latest_analysis_data.get("face_bbox")
-            status = latest_analysis_data.get("status")
-            current_error = last_error
+        # Draw feedback on the frame using the last known data
+        face_bbox = self.last_analysis_data.get("face_bbox")
+        status = self.last_analysis_data.get("status")
+        error = self.last_analysis_data.get("error")
         
         if face_bbox:
             img = draw_focus_ring(img, face_bbox, status)
         
-        if current_error:
-            cv2.putText(img, current_error, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+        if error:
+            cv2.putText(img, error, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
@@ -112,10 +110,6 @@ if st.session_state.page == "Student View":
 
     with col2:
         st.subheader("Engagement Summary")
-        
-        # Add a placeholder for the debug JSON
-        debug_placeholder = st.empty()
-        
         status_box = st.empty()
         alert_box = st.empty()
         score_box = st.empty()
@@ -134,14 +128,12 @@ if st.session_state.page == "Student View":
 
     # UI update loop
     while st.session_state.page == "Student View":
-        with lock:
-            analysis = latest_analysis_data.copy()
+        try:
+            analysis = result_queue.get(timeout=1.0)
+        except queue.Empty:
+            analysis = None
 
-        # Display the raw analysis data for debugging
-        debug_placeholder.json(analysis)
-
-        # If there is any analysis data, update the UI
-        if analysis:
+        if analysis and "error" not in analysis:
             status = analysis.get("status", "N/A")
             score = analysis.get("score", 0)
             emotion = analysis.get("emotion", "N/A")
@@ -159,17 +151,15 @@ if st.session_state.page == "Student View":
             else:
                 alert_box.empty()
             
-            # Update engagement history (check for new score to avoid duplicates)
-            if not st.session_state.engagement_history or st.session_state.engagement_history[-1].get("score") != score:
-                st.session_state.engagement_history.append({"time": pd.Timestamp.now(), "score": score})
-                if len(st.session_state.engagement_history) > 100:
-                    st.session_state.engagement_history.pop(0)
+            st.session_state.engagement_history.append({"time": pd.Timestamp.now(), "score": score})
+            if len(st.session_state.engagement_history) > 100:
+                st.session_state.engagement_history.pop(0)
         
         if st.session_state.engagement_history:
             history_df = pd.DataFrame(st.session_state.engagement_history).set_index("time")
             chart_box.line_chart(history_df)
         
-        time.sleep(1)
+        time.sleep(0.1) # Faster UI refresh
 
 
 # ======================================================================================
