@@ -19,18 +19,18 @@ if 'page' not in st.session_state:
     st.session_state.page = "Student View"
 if 'engagement_history' not in st.session_state:
     st.session_state.engagement_history = []
-if 'user_id' not in st.session_state:
-    st.session_state.user_id = str(uuid.uuid4())
 
 # --- Backend URL ---
 BACKEND_URL = "https://edugaze-backend.onrender.com"
 
 # --- WebRTC Video Processor ---
 class EduGazeVideoProcessor(VideoProcessorBase):
-    def __init__(self, user_id: str):
+    def __init__(self):
         self.last_sent = 0
-        self.user_id = user_id
+        # The processor now creates its own unique ID. This is the source of truth.
+        self.user_id = str(uuid.uuid4())
         self.last_analysis_data = {}
+        print(f"Processor created with user_id: {self.user_id}")
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
@@ -68,8 +68,8 @@ class EduGazeVideoProcessor(VideoProcessorBase):
 with st.sidebar:
     st.title("EduGaze")
     st.session_state.page = st.radio("Navigate", ["Student View", "Teacher Dashboard"])
-    st.info(f"Your User ID: {st.session_state.user_id}")
-
+    # The user_id is now dynamic, so we show it in the main panel
+    
 # ======================================================================================
 # --- Student View ---
 # ======================================================================================
@@ -81,34 +81,142 @@ if st.session_state.page == "Student View":
     with col1:
         st.subheader("Live Feed")
         st.write("Click 'Start' to begin the session. Your browser will ask for camera permission.")
-        webrtc_streamer(
+        
+        # The webrtc_streamer returns a context object
+        ctx = webrtc_streamer(
             key="student-camera",
-            video_processor_factory=lambda: EduGazeVideoProcessor(user_id=st.session_state.user_id),
+            video_processor_factory=EduGazeVideoProcessor,
             media_stream_constraints={"video": True, "audio": False},
             rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
             async_processing=True,
         )
 
     with col2:
-        st.subheader("Glass Pane Debugger")
+        st.subheader("Engagement Summary")
+        # Display the user ID from the processor context if available
+        if ctx.video_processor:
+            st.info(f"Your User ID: {ctx.video_processor.user_id}")
+
+        status_box = st.empty()
+        alert_box = st.empty()
+        score_box = st.empty()
         
-        # UI update loop - now a full debugger
-        while st.session_state.page == "Student View":
-            st.markdown("---")
-            st.subheader(f"UI Loop Refresh at {time.strftime('%H:%M:%S')}")
+        st.divider()
+        
+        col2_1, col2_2, col2_3 = st.columns(3)
+        emo_box = col2_1.empty()
+        blink_box = col2_2.empty()
+        yawn_box = col2_3.empty()
+        
+        st.divider()
 
-            my_user_id = st.session_state.user_id
-            st.write(f"**1. My User ID:** `{my_user_id}`")
+        st.subheader("Engagement Trend")
+        chart_box = st.empty()
 
-            all_data = None
-            analysis = None
-            error_message = None
-
+    # This is the main UI update loop
+    while ctx.state.playing: # Loop only while the camera is running
+        analysis = None
+        # Get the one true user_id from the running video processor
+        if ctx.video_processor:
+            processor_user_id = ctx.video_processor.user_id
             try:
-                st.write("**2. Fetching data from backend...**")
                 all_data = requests.get(f"{BACKEND_URL}/dashboard/data", timeout=5).json()
-                st.write("**3. Data received from backend:**")
-                st.json(all_data if all_data else {"message": "Backend returned empty response."})
+                analysis = all_data.get(processor_user_id)
+            except Exception:
+                pass
+
+        if analysis:
+            status = analysis.get("status", "N/A")
+            score = analysis.get("score", 0)
+            emotion = analysis.get("emotion", "N/A")
+            blinks = analysis.get("blinks", 0)
+            yawns = analysis.get("yawns", 0)
+
+            status_box.write(f"### Status: **{status}**")
+            score_box.metric("Engagement Score", f"{score:.2f}")
+            emo_box.metric("Emotion", emotion.capitalize())
+            blink_box.metric("Blinks", blinks)
+            yawn_box.metric("Yawns", yawns)
+
+            if status == "Low Engagement":
+                alert_box.error("Low Engagement Detected!", icon="⚠️")
+            else:
+                alert_box.empty()
+            
+            if not st.session_state.engagement_history or st.session_state.engagement_history[-1].get("score") != score:
+                st.session_state.engagement_history.append({"time": pd.Timestamp.now(), "score": score})
+                if len(st.session_state.engagement_history) > 100:
+                    st.session_state.engagement_history.pop(0)
+        
+        if st.session_state.engagement_history:
+            history_df = pd.DataFrame(st.session_state.engagement_history).set_index("time")
+            chart_box.line_chart(history_df)
+        
+        time.sleep(2)
+
+# ======================================================================================
+# --- Teacher Dashboard View ---
+# ======================================================================================
+elif st.session_state.page == "Teacher Dashboard":
+    st.header("Teacher Dashboard")
+    st.subheader("Live Student Grid")
+
+    placeholder = st.empty()
+
+    while True:
+        try:
+            resp = requests.get(f"{BACKEND_URL}/dashboard/data", timeout=5).json()
+            
+            with placeholder.container():
+                if not resp:
+                    st.info("No student data available yet. Ask students to open the Student View.")
+                else:
+                    student_ids = list(resp.keys())
+                    num_students = len(student_ids)
+                    
+                    cols = st.columns(4)
+                    
+                    for i in range(num_students):
+                        user_id = student_ids[i]
+                        data = resp[user_id]
+                        col = cols[i % 4]
+
+                        with col:
+                            st.subheader(f"Student #{user_id[:4]}")
+                            
+                            img_data = data.get("live_frame", "").split(",")[1]
+                            if img_data:
+                                img_bytes = base64.b64decode(img_data)
+                                img = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
+                                st.image(img[:,:,::-1], width='stretch')
+
+                            score = data.get('score', 0)
+                            status = data.get('status', 'N/A')
+                            is_flagged = data.get('is_flagged', False)
+
+                            if is_flagged:
+                                st.error("🚩 FLAGGED: Low Engagement > 1 min")
+                            
+                            st.metric("Score", f"{score:.2f}")
+                            
+                            if not is_flagged:
+                                if status == "Low Engagement":
+                                    st.warning(f"Status: {status}")
+                                elif status == "Medium Engagement":
+                                    st.info(f"Status: {status}")
+                                else:
+                                    st.success(f"Status: {status}")
+
+        except requests.exceptions.RequestException as e:
+            with placeholder.container():
+                st.error(f"Could not connect to backend: {e}")
+        
+        except Exception as e:
+            with placeholder.container():
+                st.error(f"An error occurred: {e}")
+            break
+
+        time.sleep(2)
 
                 analysis = all_data.get(my_user_id)
                 st.write("**4. Result of looking for my User ID:**")
