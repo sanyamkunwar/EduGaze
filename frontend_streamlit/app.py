@@ -24,7 +24,7 @@ if 'last_sent' not in st.session_state:
 
 # --- Backend URL ---
 # This will be replaced with the deployed backend URL
-BACKEND_URL = "http://127.0.0.1:8000"
+BACKEND_URL = "https://edugaze-backend.onrender.com"
 
 # --- Sidebar for Navigation ---
 with st.sidebar:
