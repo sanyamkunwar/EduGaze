@@ -21,24 +21,23 @@ if 'page' not in st.session_state:
     st.session_state.page = "Student View"
 if 'engagement_history' not in st.session_state:
     st.session_state.engagement_history = []
+if 'user_id' not in st.session_state:
+    st.session_state.user_id = str(uuid.uuid4())
 
 # --- Backend URL ---
 BACKEND_URL = "https://edugaze-backend.onrender.com"
 
-# --- Thread-safe Queue for results ---
-result_queue: "queue.Queue[dict]" = queue.Queue()
-
 # --- WebRTC Video Processor ---
 class EduGazeVideoProcessor(VideoProcessorBase):
-    def __init__(self, user_id: str):
+    def __init__(self, user_id: str, result_queue: queue.Queue):
         self.last_sent = 0
         self.user_id = user_id
-        self.last_analysis_data = {} # Store last result for drawing
+        self.result_queue = result_queue
+        self.last_analysis_data = {}
 
     def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
         img = frame.to_ndarray(format="bgr24")
 
-        # Analyze frame every ~1 second
         if time.time() - self.last_sent > 1.0:
             self.last_sent = time.time()
             try:
@@ -50,18 +49,19 @@ class EduGazeVideoProcessor(VideoProcessorBase):
                 ).json()
                 
                 self.last_analysis_data = resp
-                result_queue.put(resp)
+                self.result_queue.put(resp)
 
             except requests.exceptions.RequestException as e:
                 print(f"Backend connection error: {e}")
-                self.last_analysis_data = {"error": "Backend connection failed."}
-                result_queue.put(self.last_analysis_data)
+                error_data = {"error": "Backend connection failed."}
+                self.last_analysis_data = error_data
+                self.result_queue.put(error_data)
             except Exception as e:
                 print(f"An error occurred in video processor: {e}")
-                self.last_analysis_data = {"error": "Analysis failed."}
-                result_queue.put(self.last_analysis_data)
+                error_data = {"error": "Analysis failed."}
+                self.last_analysis_data = error_data
+                self.result_queue.put(error_data)
 
-        # Draw feedback on the frame using the last known data
         face_bbox = self.last_analysis_data.get("face_bbox")
         status = self.last_analysis_data.get("status")
         error = self.last_analysis_data.get("error")
@@ -74,19 +74,11 @@ class EduGazeVideoProcessor(VideoProcessorBase):
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-# --- Factory function to create the processor ---
-def processor_factory():
-    if 'user_id' not in st.session_state:
-        st.session_state.user_id = str(uuid.uuid4())
-    
-    return EduGazeVideoProcessor(user_id=st.session_state.user_id)
-
 # --- Sidebar for Navigation ---
 with st.sidebar:
     st.title("EduGaze")
     st.session_state.page = st.radio("Navigate", ["Student View", "Teacher Dashboard"])
-    if 'user_id' in st.session_state:
-        st.info(f"Your User ID: {st.session_state.user_id}")
+    st.info(f"Your User ID: {st.session_state.user_id}")
 
 # ======================================================================================
 # --- Student View ---
@@ -95,13 +87,14 @@ if st.session_state.page == "Student View":
     st.header("Student Engagement Monitor")
     
     col1, col2 = st.columns([2, 1])
+    result_queue = queue.Queue()
 
     with col1:
         st.subheader("Live Feed")
         st.write("Click 'Start' to begin the session. Your browser will ask for camera permission.")
         webrtc_streamer(
             key="student-camera",
-            video_processor_factory=processor_factory,
+            video_processor_factory=lambda: EduGazeVideoProcessor(user_id=st.session_state.user_id, result_queue=result_queue),
             media_stream_constraints={"video": True, "audio": False},
             rtc_configuration={"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]},
             async_processing=True,
@@ -109,19 +102,55 @@ if st.session_state.page == "Student View":
 
     with col2:
         st.subheader("Engagement Summary")
-        # This is now just a debug area
-        debug_area = st.empty()
+        status_box = st.empty()
+        alert_box = st.empty()
+        score_box = st.empty()
+        
+        st.divider()
+        
+        col2_1, col2_2, col2_3 = st.columns(3)
+        emo_box = col2_1.empty()
+        blink_box = col2_2.empty()
+        yawn_box = col2_3.empty()
+        
+        st.divider()
 
-    # Minimal debug loop
+        st.subheader("Engagement Trend")
+        chart_box = st.empty()
+
     while st.session_state.page == "Student View":
         try:
             analysis = result_queue.get(timeout=1.0)
-            debug_area.json(analysis)
         except queue.Empty:
-            debug_area.write("Waiting for analysis data...")
-        
-        time.sleep(0.5)
+            analysis = None
 
+        if analysis and "error" not in analysis:
+            status = analysis.get("status", "N/A")
+            score = analysis.get("score", 0)
+            emotion = analysis.get("emotion", "N/A")
+            blinks = analysis.get("blinks", 0)
+            yawns = analysis.get("yawns", 0)
+
+            status_box.write(f"### Status: **{status}**")
+            score_box.metric("Engagement Score", f"{score:.2f}")
+            emo_box.metric("Emotion", emotion.capitalize())
+            blink_box.metric("Blinks", blinks)
+            yawn_box.metric("Yawns", yawns)
+
+            if status == "Low Engagement":
+                alert_box.error("Low Engagement Detected!", icon="⚠️")
+            else:
+                alert_box.empty()
+            
+            st.session_state.engagement_history.append({"time": pd.Timestamp.now(), "score": score})
+            if len(st.session_state.engagement_history) > 100:
+                st.session_state.engagement_history.pop(0)
+        
+        if st.session_state.engagement_history:
+            history_df = pd.DataFrame(st.session_state.engagement_history).set_index("time")
+            chart_box.line_chart(history_df)
+        
+        time.sleep(0.1)
 
 # ======================================================================================
 # --- Teacher Dashboard View ---
@@ -143,7 +172,7 @@ elif st.session_state.page == "Teacher Dashboard":
                     student_ids = list(resp.keys())
                     num_students = len(student_ids)
                     
-                    cols = st.columns(4) # Display up to 4 students per row
+                    cols = st.columns(4)
                     
                     for i in range(num_students):
                         user_id = student_ids[i]
@@ -153,7 +182,6 @@ elif st.session_state.page == "Teacher Dashboard":
                         with col:
                             st.subheader(f"Student #{user_id[:4]}")
                             
-                            # Decode and display live frame
                             img_data = data.get("live_frame", "").split(",")[1]
                             if img_data:
                                 img_bytes = base64.b64decode(img_data)
@@ -169,7 +197,7 @@ elif st.session_state.page == "Teacher Dashboard":
                             
                             st.metric("Score", f"{score:.2f}")
                             
-                            if not is_flagged: # Don't show status if already flagged
+                            if not is_flagged:
                                 if status == "Low Engagement":
                                     st.warning(f"Status: {status}")
                                 elif status == "Medium Engagement":
@@ -186,4 +214,4 @@ elif st.session_state.page == "Teacher Dashboard":
                 st.error(f"An error occurred: {e}")
             break
 
-        time.sleep(2) # Refresh rate for the dashboard
+        time.sleep(2)
