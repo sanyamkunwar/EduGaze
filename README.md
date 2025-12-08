@@ -9,6 +9,7 @@ EduGaze is a real-time monitoring tool designed to help educators gauge student 
 ## Live Demo
 
 **You can try the live application here:** [**https://edugaze.streamlit.app/**](https://edugaze.streamlit.app/)
+**Render Url:** [**https://edugaze-backend.onrender.com/**](https://edugaze-backend.onrender.com/)
 
 *Note: The backend is hosted on a free Render instance, which may "spin down" from inactivity. The first analysis may take up to 30 seconds to complete as the server wakes up.*
 
